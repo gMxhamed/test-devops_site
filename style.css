@@ -1,0 +1,57 @@
+body {
+  font-family: Arial, sans-serif;
+  background-color: white;
+  color: #003366;
+  margin: 0;
+  padding: 0;
+}
+
+header {
+  background-color: #003366;
+  color: white;
+  padding: 1em;
+  text-align: center;
+}
+
+nav a {
+  color: white;
+  margin: 0 15px;
+  text-decoration: none;
+}
+
+main {
+  padding: 2em;
+}
+
+form {
+  max-width: 500px;
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+label, input, textarea {
+  margin: 10px 0;
+}
+
+button {
+  background-color: #0066cc;
+  color: white;
+  border: none;
+  padding: 10px;
+  cursor: pointer;
+}
+
+button:hover {
+  background-color: #004999;
+}
+
+footer {
+  text-align: center;
+  padding: 1em;
+  background-color: #003366;
+  color: white;
+  position: fixed;
+  width: 100%;
+  bottom: 0;
+}
