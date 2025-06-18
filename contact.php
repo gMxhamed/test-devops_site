@@ -38,6 +38,3 @@
   </footer>
 </body>
 </html>
-
-
-hello
