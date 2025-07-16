@@ -1,108 +1,217 @@
 #!/bin/bash
 
-echo "=== LAMP Backup Script ==="
-echo "Starting backup: $(date)"
+set -e
 
-# Configuration
 WEB_DIR="/var/www/html"
 BACKUP_DIR="/var/backups/lamp"
-DATE=$(date +%Y%m%d_%H%M%S)
 MYSQL_USER="root"
-MYSQL_PASS="Devops_2025"
+ROOT_PASSWORD=""
+RETENTION_DAYS=7
+LOG_FILE="/var/log/backup.log"
 
-# Create backup directory
-mkdir -p "$BACKUP_DIR"
+log_message() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
+}
 
-echo
-echo ">>> Step 1: Web Files Backup"
-echo "----------------------------------------"
+show_help() {
+    echo "Usage: $0 [OPTIONS]"
+    echo ""
+    echo "Options:"
+    echo "  -w, --web-dir PATH        Web directory (default: $WEB_DIR)"
+    echo "  -b, --backup-dir PATH     Backup directory (default: $BACKUP_DIR)"
+    echo "  -u, --mysql-user USER     MySQL user (default: $MYSQL_USER)"
+    echo "  -p, --root-password PASS  MySQL root password"
+    echo "  -r, --retention DAYS      Retention days (default: $RETENTION_DAYS)"
+    echo "  -l, --log-file PATH       Log file (default: $LOG_FILE)"
+    echo "  -h, --help               Show help"
+    echo ""
+    echo "Environment variables:"
+    echo "  MARIADB_ROOT_PASSWORD     MariaDB root password (recommended)"
+}
 
-# Check if web directory exists
-if [ ! -d "$WEB_DIR" ]; then
-    echo "ERROR: Web directory not found"
-    exit 1
-fi
-
-# Backup web files
-WEB_BACKUP="web_$DATE.tar.gz"
-echo "Creating web backup: $WEB_BACKUP"
-
-if tar -czf "$BACKUP_DIR/$WEB_BACKUP" -C "$WEB_DIR" . ; then
-    WEB_SIZE=$(du -h "$BACKUP_DIR/$WEB_BACKUP" | cut -f1)
-    echo "SUCCESS: Web backup created ($WEB_SIZE)"
-else
-    echo "ERROR: Web backup failed"
-    exit 1
-fi
-
-echo
-echo ">>> Step 2: Database Backup"
-echo "----------------------------------------"
-
-# Check MariaDB status
-if ! systemctl is-active mariadb > /dev/null; then
-    echo "ERROR: MariaDB not running"
-    exit 1
-fi
-
-# Test database connection
-if ! mysql -u "$MYSQL_USER" -p"$MYSQL_PASS" -e "SELECT 1;" 2>/dev/null; then
-    echo "ERROR: Cannot connect to database with provided credentials"
-    exit 1
-fi
-
-# Get databases list
-DATABASES=$(mysql -u "$MYSQL_USER" -p"$MYSQL_PASS" -e "SHOW DATABASES;" 2>/dev/null | grep -v Database | grep -v information_schema | grep -v performance_schema | grep -v sys)
-
-if [ -z "$DATABASES" ]; then
-    echo "No user databases found"
-    DB_COUNT=0
-else
-    echo "Found databases: $DATABASES"
-    DB_COUNT=0
-    
-    # Backup each database
-    for db in $DATABASES; do
-        DB_BACKUP="${db}_$DATE.sql"
-        echo "Backing up database: $db"
-        
-        if mysqldump -u "$MYSQL_USER" -p"$MYSQL_PASS" "$db" > "$BACKUP_DIR/$DB_BACKUP" 2>/dev/null; then
-            gzip "$BACKUP_DIR/$DB_BACKUP"
-            DB_SIZE=$(du -h "$BACKUP_DIR/${DB_BACKUP}.gz" | cut -f1)
-            echo "SUCCESS: $db backed up ($DB_SIZE)"
-            DB_COUNT=$((DB_COUNT + 1))
-        else
-            echo "ERROR: Failed to backup $db"
-        fi
+parse_arguments() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -w|--web-dir)
+                WEB_DIR="$2"
+                shift 2
+                ;;
+            -b|--backup-dir)
+                BACKUP_DIR="$2"
+                shift 2
+                ;;
+            -u|--mysql-user)
+                MYSQL_USER="$2"
+                shift 2
+                ;;
+            -p|--root-password)
+                ROOT_PASSWORD="$2"
+                shift 2
+                ;;
+            -r|--retention)
+                RETENTION_DAYS="$2"
+                shift 2
+                ;;
+            -l|--log-file)
+                LOG_FILE="$2"
+                shift 2
+                ;;
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            *)
+                echo "ERROR: Unknown option: $1"
+                show_help
+                exit 1
+                ;;
+        esac
     done
-fi
+}
 
-# Backup MySQL users
-echo "Backing up MySQL users"
-mysql -u "$MYSQL_USER" -p"$MYSQL_PASS" -e "SELECT User, Host FROM mysql.user;" > "$BACKUP_DIR/mysql_users_$DATE.txt" 2>/dev/null
+check_prerequisites() {
+    if [ -z "$ROOT_PASSWORD" ] && [ -n "$MARIADB_ROOT_PASSWORD" ]; then
+        ROOT_PASSWORD="$MARIADB_ROOT_PASSWORD"
+    fi
+    
+    if [ ! -d "$WEB_DIR" ]; then
+        log_message "ERROR: Web directory not found: $WEB_DIR"
+        exit 1
+    fi
+    
+    if ! command -v mysqldump >/dev/null 2>&1; then
+        log_message "ERROR: mysqldump not found"
+        exit 1
+    fi
+    
+    if ! mkdir -p "$BACKUP_DIR" 2>/dev/null; then
+        log_message "ERROR: Cannot create backup directory: $BACKUP_DIR"
+        exit 1
+    fi
+    
+    if ! mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null; then
+        echo "ERROR: Cannot create log directory: $(dirname "$LOG_FILE")"
+        exit 1
+    fi
+}
 
-echo
-echo ">>> Step 3: Cleanup Old Backups"
-echo "----------------------------------------"
+backup_web_files() {
+    log_message ">>> Step 1: Web Files Backup"
+    log_message "----------------------------------------"
+    
+    local DATE=$(date +%Y%m%d_%H%M%S)
+    local WEB_BACKUP="web_$DATE.tar.gz"
+    
+    log_message "Creating web backup: $WEB_BACKUP"
+    
+    if tar -czf "$BACKUP_DIR/$WEB_BACKUP" -C "$WEB_DIR" . ; then
+        local WEB_SIZE=$(du -h "$BACKUP_DIR/$WEB_BACKUP" | cut -f1)
+        log_message "SUCCESS: Web backup created ($WEB_SIZE)"
+        echo "WEB_BACKUP=$WEB_BACKUP" > /tmp/backup_vars
+        echo "WEB_SIZE=$WEB_SIZE" >> /tmp/backup_vars
+    else
+        log_message "ERROR: Web backup failed"
+        exit 1
+    fi
+}
 
-# Remove backups older than 7 days
-REMOVED_COUNT=$(find "$BACKUP_DIR" -name "web_*.tar.gz" -mtime +7 -delete -print 2>/dev/null | wc -l)
-REMOVED_COUNT=$((REMOVED_COUNT + $(find "$BACKUP_DIR" -name "*_*.sql.gz" -mtime +7 -delete -print 2>/dev/null | wc -l)))
-REMOVED_COUNT=$((REMOVED_COUNT + $(find "$BACKUP_DIR" -name "mysql_users_*.txt" -mtime +7 -delete -print 2>/dev/null | wc -l)))
+backup_databases() {
+    log_message ""
+    log_message ">>> Step 2: Database Backup"
+    log_message "----------------------------------------"
+    
+    if ! systemctl is-active mariadb > /dev/null; then
+        log_message "ERROR: MariaDB not running"
+        exit 1
+    fi
+    
+    local mysql_opts=""
+    if [ -n "$ROOT_PASSWORD" ]; then
+        mysql_opts="-p$ROOT_PASSWORD"
+    fi
+    
+    if ! mysql -u "$MYSQL_USER" $mysql_opts -e "SELECT 1;" 2>/dev/null; then
+        log_message "ERROR: Cannot connect to database"
+        exit 1
+    fi
+    
+    local DATABASES=$(mysql -u "$MYSQL_USER" $mysql_opts -e "SHOW DATABASES;" 2>/dev/null | grep -v Database | grep -v information_schema | grep -v performance_schema | grep -v sys)
+    local DATE=$(date +%Y%m%d_%H%M%S)
+    local DB_COUNT=0
+    
+    if [ -z "$DATABASES" ]; then
+        log_message "No user databases found"
+    else
+        log_message "Found databases: $DATABASES"
+        
+        for db in $DATABASES; do
+            local DB_BACKUP="${db}_$DATE.sql"
+            log_message "Backing up database: $db"
+            if mysqldump -u "$MYSQL_USER" $mysql_opts "$db" > "$BACKUP_DIR/$DB_BACKUP" 2>/dev/null; then
+                gzip "$BACKUP_DIR/$DB_BACKUP"
+                local DB_SIZE=$(du -h "$BACKUP_DIR/${DB_BACKUP}.gz" | cut -f1)
+                log_message "SUCCESS: $db backed up ($DB_SIZE)"
+                DB_COUNT=$((DB_COUNT + 1))
+            else
+                log_message "ERROR: Failed to backup $db"
+            fi
+        done
+    fi
+    
+    log_message "Backing up MySQL users"
+    mysql -u "$MYSQL_USER" $mysql_opts -e "SELECT User, Host FROM mysql.user;" > "$BACKUP_DIR/mysql_users_$DATE.txt" 2>/dev/null
+    
+    echo "DB_COUNT=$DB_COUNT" >> /tmp/backup_vars
+}
 
-echo "Removed $REMOVED_COUNT old backup files"
+cleanup_old_backups() {
+    log_message ""
+    log_message ">>> Step 3: Cleanup Old Backups"
+    log_message "----------------------------------------"
+    
+    local REMOVED_COUNT=$(find "$BACKUP_DIR" -name "web_*.tar.gz" -mtime +$RETENTION_DAYS -delete -print 2>/dev/null | wc -l)
+    REMOVED_COUNT=$((REMOVED_COUNT + $(find "$BACKUP_DIR" -name "*_*.sql.gz" -mtime +$RETENTION_DAYS -delete -print 2>/dev/null | wc -l)))
+    REMOVED_COUNT=$((REMOVED_COUNT + $(find "$BACKUP_DIR" -name "mysql_users_*.txt" -mtime +$RETENTION_DAYS -delete -print 2>/dev/null | wc -l)))
+    
+    log_message "Removed $REMOVED_COUNT old backup files"
+}
 
-echo
-echo ">>> Backup Summary"
-echo "----------------------------------------"
-echo "Backup location: $BACKUP_DIR"
-echo "Web backup: $WEB_BACKUP ($WEB_SIZE)"
-echo "Databases backed up: $DB_COUNT"
-echo "Backup completed: $(date)"
+show_summary() {
+    log_message ""
+    log_message ">>> Backup Summary"
+    log_message "----------------------------------------"
+    
+    if [ -f /tmp/backup_vars ]; then
+        source /tmp/backup_vars
+    fi
+    
+    log_message "Backup location: $BACKUP_DIR"
+    [ -n "$WEB_BACKUP" ] && log_message "Web backup: $WEB_BACKUP ($WEB_SIZE)"
+    [ -n "$DB_COUNT" ] && log_message "Databases backed up: $DB_COUNT"
+    log_message "Backup completed: $(date)"
+    log_message ""
+    log_message "Current backups:"
+    ls -lht "$BACKUP_DIR" | head -10 | while read line; do log_message "$line"; done
+    log_message ""
+    log_message "Backup completed successfully!"
+    
+    rm -f /tmp/backup_vars
+}
 
-echo
-echo "Current backups:"
-ls -lht "$BACKUP_DIR" | head -10
+main() {
+    log_message "=== LAMP Backup Script ==="
+    log_message "Starting backup: $(date)"
+    
+    parse_arguments "$@"
+    check_prerequisites
+    mkdir -p "$BACKUP_DIR"
+    
+    backup_web_files
+    backup_databases
+    cleanup_old_backups
+    show_summary
+}
 
-echo
-echo "Backup completed successfully!"
+trap 'log_message "ERROR: Script interrupted"; rm -f /tmp/backup_vars; exit 1' INT TERM
+
+main "$@"
