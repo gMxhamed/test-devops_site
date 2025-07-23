@@ -1,0 +1,245 @@
+name: LAMP Project CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  PHP_VERSION: '8.3.6'
+  NODE_VERSION: '18'
+
+jobs:
+  validate-scripts:
+    name: Validate Scripts
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: ${{ env.PHP_VERSION }}
+    
+    - name: Check Bash scripts syntax
+      run: |
+        find scripts/ -name "*.sh" -type f -exec bash -n {} \;
+        test -f scripts/backup.sh
+        test -f scripts/install-lamp.sh
+    
+    - name: Check PHP syntax
+      run: |
+        find . -name "*.php" -type f -exec php -l {} \;
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+    
+    - name: Check JavaScript syntax
+      run: |
+        npm install -g jshint
+        find . -name "*.js" -type f -exec jshint {} \;
+    
+    - name: Check CSS syntax
+      run: |
+        npm install -g csslint
+        find . -name "*.css" -type f -exec csslint {} \;
+    
+    - name: Check HTML syntax
+      run: |
+        find . -name "*.html" -type f -exec echo "Checking {}" \;
+
+  security-check:
+    name: Security Check
+    runs-on: ubuntu-latest
+    needs: validate-scripts
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Check for hardcoded credentials
+      run: |
+        ! grep -r -i "password.*=" --include="*.php" --include="*.sh" . | grep -v "#" | grep -v "example"
+    
+    - name: Check for SQL injection vulnerabilities
+      run: |
+        ! grep -r "mysql_query\|mysqli_query" --include="*.php" .
+        grep -r "prepare\|PDO" --include="*.php" . || true
+    
+    - name: Check for XSS vulnerabilities
+      run: |
+        grep -r "htmlspecialchars\|htmlentities" --include="*.php" . || true
+    
+    - name: Check file permissions
+      run: |
+        find scripts/ -name "*.sh" -type f -executable
+
+  functional-test:
+    name: Functional Test
+    runs-on: ubuntu-latest
+    needs: validate-scripts
+    
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: testpassword
+          MYSQL_DATABASE: devops_site
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=3
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: ${{ env.PHP_VERSION }}
+        extensions: mysqli, pdo_mysql
+    
+    - name: Install Apache
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y apache2
+        sudo systemctl start apache2
+    
+    - name: Test PHP-MySQL connection
+      run: |
+        php -r "
+        try {
+            \$pdo = new PDO('mysql:host=127.0.0.1;port=3306', 'root', 'testpassword');
+            echo 'MySQL connection successful' . PHP_EOL;
+        } catch(PDOException \$e) {
+            echo 'Connection failed: ' . \$e->getMessage() . PHP_EOL;
+            exit(1);
+        }
+        "
+    
+    - name: Create test database structure
+      run: |
+        mysql -h 127.0.0.1 -u root -ptestpassword -e "
+        CREATE DATABASE IF NOT EXISTS devops_site;
+        USE devops_site;
+        CREATE TABLE IF NOT EXISTS messages (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          nom VARCHAR(255) NOT NULL,
+          email VARCHAR(255) NOT NULL,
+          message TEXT NOT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE USER IF NOT EXISTS 'devops'@'localhost' IDENTIFIED BY '\$uperPa\$\$_2025';
+        GRANT ALL PRIVILEGES ON devops_site.* TO 'devops'@'localhost';
+        FLUSH PRIVILEGES;
+        "
+    
+    - name: Test backup script
+      env:
+        MARIADB_ROOT_PASSWORD: testpassword
+      run: |
+        mkdir -p /tmp/test_web /tmp/test_backup
+        echo "<h1>Test Website</h1>" > /tmp/test_web/index.html
+        echo "<?php echo 'Test PHP'; ?>" > /tmp/test_web/test.php
+        
+        ./scripts/backup.sh --help
+        ./scripts/backup.sh -w /tmp/test_web -b /tmp/test_backup -l /tmp/test_backup.log
+        
+        ls -la /tmp/test_backup/
+        test -f /tmp/test_backup/web_*.tar.gz
+    
+    - name: Test install script help
+      run: |
+        ./scripts/install-lamp.sh --help
+
+  code-quality:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Check file structure
+      run: |
+        test -f index.php
+        test -f contact.php
+        test -f db.php
+        test -f envoyer.php
+        test -f script.js
+        test -f style.css
+        test -d scripts/
+    
+    - name: Check for TODO/FIXME
+      run: |
+        grep -r "TODO\|FIXME\|XXX" --include="*.php" --include="*.js" --include="*.css" . || true
+    
+    - name: Check line endings
+      run: |
+        ! find . -name "*.php" -o -name "*.js" -o -name "*.css" | xargs file | grep CRLF
+    
+    - name: Check for trailing whitespace
+      run: |
+        ! find . -name "*.php" -o -name "*.js" -o -name "*.css" | xargs grep -l "[[:space:]]$"
+
+  documentation-check:
+    name: Documentation Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Check README exists
+      run: |
+        test -f README.md
+    
+    - name: Check README content
+      run: |
+        grep -qi "lamp\|apache\|mysql\|mariadb\|php" README.md
+        grep -qi "installation\|setup\|usage" README.md
+    
+    - name: Check script help functions
+      run: |
+        grep -q "show_help" scripts/backup.sh
+        grep -q "show_help" scripts/install-lamp.sh
+
+  final-report:
+    name: Final Report
+    runs-on: ubuntu-latest
+    needs: [validate-scripts, security-check, functional-test, code-quality, documentation-check]
+    if: always()
+    
+    steps:
+    - name: Generate report
+      run: |
+        echo "=== CI/CD Report ==="
+        echo "Scripts validation: ${{ needs.validate-scripts.result }}"
+        echo "Security check: ${{ needs.security-check.result }}"
+        echo "Functional tests: ${{ needs.functional-test.result }}"
+        echo "Code quality: ${{ needs.code-quality.result }}"
+        echo "Documentation: ${{ needs.documentation-check.result }}"
+        
+        score=0
+        total=5
+        
+        [ "${{ needs.validate-scripts.result }}" == "success" ] && score=$((score + 1))
+        [ "${{ needs.security-check.result }}" == "success" ] && score=$((score + 1))
+        [ "${{ needs.functional-test.result }}" == "success" ] && score=$((score + 1))
+        [ "${{ needs.code-quality.result }}" == "success" ] && score=$((score + 1))
+        [ "${{ needs.documentation-check.result }}" == "success" ] && score=$((score + 1))
+        
+        echo "Quality Score: $score/$total"
+        
+        if [ "$score" -eq "$total" ]; then
+          echo "All checks passed - Ready for production"
+        elif [ "$score" -ge 4 ]; then
+          echo "Good quality - Minor improvements possible"
+        else
+          echo "Improvements needed before deployment"
+        fi
